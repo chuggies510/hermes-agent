@@ -191,6 +191,48 @@ plugin; choose a new exact commit explicitly with
 profile-local install metadata contains no config values, environment values,
 secrets, or capability grants.
 
+For a plugin stored below the repository root, keep the subdirectory in the
+source on both install and upgrade. Either spelling is supported:
+
+```bash
+hermes plugins install owner/repo/path/to/plugin --ref <40-character-commit> --no-enable
+hermes plugins install 'https://github.com/owner/repo#path/to/plugin' --ref <40-character-commit> --no-enable
+hermes plugins enable <plugin-name>
+```
+
+Do not copy a plugin's bundled skills into your profile's `skills/` directory.
+They remain owned by the installed plugin and load under its qualified namespace
+after the plugin is enabled.
+
+### Apply, verify, and recover an install
+
+Plugin discovery happens when the serving process starts, while enable/disable
+changes apply to the next session. After an install, upgrade, enable, or disable:
+
+- CLI: exit and relaunch Hermes, then start a new session.
+- Desktop or a messaging gateway: restart the backend/gateway, then start a new
+  chat or reload the Skills view. Coordinate the restart when other profiles
+  share that gateway.
+
+Verify the active profile rather than the default profile by accident:
+
+```bash
+hermes -p <profile> plugins list
+hermes -p <profile> plugins doctor <plugin-name>
+```
+
+If bundled skills are absent, confirm that the plugin is installed and enabled,
+then relaunch or restart as above. A security-scan caution is not an install
+failure to bypass blindly: review every finding before choosing `--force`.
+
+To roll back a pinned upgrade, reinstall the last known-good commit and repeat
+the same restart/session steps:
+
+```bash
+hermes -p <profile> plugins install <source> --force --ref <previous-40-character-commit> --no-enable
+hermes -p <profile> plugins enable <plugin-name>
+```
+
 The same pin is available in Hermes Desktop: **Skills → Plugins → Install from
 Git** has a *Pin to commit* field that takes the full 40-character SHA, and the
 plugins list shows a `pinned @ <sha8>` badge on every pinned install so a team

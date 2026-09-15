@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -390,6 +393,126 @@ class TestCmdInstall:
         assert plugins_dir not in [call.args[0] for call in mock_rmtree.call_args_list]
         mock_move.assert_not_called()
         mock_display_after_install.assert_not_called()
+
+    def test_pinned_portable_subdir_install_delivers_skills_without_copying(
+        self, tmp_path, monkeypatch
+    ):
+        """A Git-subdir install remains the skill source in a fresh process."""
+        from hermes_cli import plugins_cmd as pc
+
+        repo = tmp_path / "repo"
+        runtime = repo / "runtime"
+        runtime.mkdir(parents=True)
+        (runtime / "plugin.json").write_text(
+            json.dumps({
+                "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+                "name": "portable-demo",
+                "version": "1.0.0",
+                "description": "Portable install regression fixture.",
+            }),
+            encoding="utf-8",
+        )
+        for name in ("first-skill", "second-skill"):
+            skill = runtime / "skills" / name / "SKILL.md"
+            skill.parent.mkdir(parents=True)
+            skill.write_text(
+                f"---\nname: {name}\ndescription: Use when testing {name}.\n---\n\n# {name}\n",
+                encoding="utf-8",
+            )
+
+        def git(*args: str) -> str:
+            result = subprocess.run(
+                ["git", *args], cwd=repo, capture_output=True, text=True, check=False
+            )
+            assert result.returncode == 0, result.stderr
+            return result.stdout.strip()
+
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "test@example.invalid")
+        git("config", "user.name", "Hermes Test")
+        git("add", ".")
+        git("commit", "-qm", "fixture")
+        revision = git("rev-parse", "HEAD")
+
+        home = tmp_path / "home"
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setattr(pc, "_scan_on_install_enabled", lambda: False)
+        target, _manifest, installed_name = pc._install_plugin_core(
+            f"{repo.as_uri()}#runtime", force=False, ref=revision
+        )
+
+        metadata = json.loads((home / "plugins" / ".install-metadata.json").read_text())
+        expected_bare = ["first-skill", "second-skill"]
+        assert sorted(path.parent.name for path in target.glob("skills/*/SKILL.md")) == expected_bare
+        assert installed_name == "portable-demo"
+        assert metadata[installed_name] == {
+            "pinned": True,
+            "revision": revision,
+            "source": f"{repo.as_uri()}#runtime",
+        }
+        assert not (home / "skills").exists()
+        (home / "config.yaml").write_text(
+            "plugins:\n  enabled:\n    - portable-demo\n", encoding="utf-8"
+        )
+
+        project_root = Path(__file__).resolve().parents[2]
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import json, os; "
+                    "from pathlib import Path; "
+                    "from starlette.testclient import TestClient; "
+                    "from hermes_cli.plugins import discover_plugins, get_plugin_manager; "
+                    "from tools.skills_tool import skill_view, skills_list; "
+                    "discover_plugins(); "
+                    "manager = get_plugin_manager(); "
+                    "names = sorted(row['name'] for row in manager.list_plugin_skill_metadata()); "
+                    "listed = json.loads(skills_list()); "
+                    "plugin_names = sorted(row['name'] for row in listed['skills'] "
+                    "if row.get('category') == 'plugin'); "
+                    "view = json.loads(skill_view(next(name for name in names "
+                    "if name.endswith(':first-skill')))); "
+                    "from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN; "
+                    "client = TestClient(app); "
+                    "client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN; "
+                    "api = client.get('/api/skills'); "
+                    "api_names = sorted(row['name'] for row in api.json() "
+                    "if row.get('provenance') == 'plugin'); "
+                    "content = client.get('/api/skills/content', "
+                    "params={'name': next(name for name in names "
+                    "if name.endswith(':first-skill'))}); "
+                    "copies = sorted(path.parent.name for path in "
+                    "(Path(os.environ['HERMES_HOME']) / 'skills').glob('*/SKILL.md')); "
+                    "print(json.dumps({'names': names, 'listed': plugin_names, "
+                    "'view': view, 'api_status': api.status_code, 'api': api_names, "
+                    "'content_status': content.status_code, 'content': content.json(), "
+                    "'copies': copies}))"
+                ),
+            ],
+            cwd=project_root,
+            env={**os.environ, "HERMES_HOME": str(home), "PYTHONPATH": str(project_root)},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert probe.returncode == 0, probe.stderr
+        result = json.loads(probe.stdout)
+        namespaces = {name.rsplit(":", 1)[0] for name in result["names"]}
+        assert len(namespaces) == 1
+        namespace = namespaces.pop()
+        assert namespace.startswith("agent-plugin-portable-demo-")
+        assert [name.rsplit(":", 1)[1] for name in result["names"]] == expected_bare
+        assert result["listed"] == result["names"]
+        assert result["view"]["success"] is True
+        assert result["view"]["name"] == f"{namespace}:first-skill"
+        assert result["api_status"] == 200
+        assert result["api"] == result["names"]
+        assert result["content_status"] == 200
+        assert result["content"]["name"] == f"{namespace}:first-skill"
+        assert "# first-skill" in result["content"]["content"]
+        assert result["copies"] == []
 
 
 # ── cmd_update tests ─────────────────────────────────────────────────────────
