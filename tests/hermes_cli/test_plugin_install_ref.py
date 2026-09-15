@@ -272,6 +272,56 @@ def test_dashboard_update_also_refuses_to_drift_pin(monkeypatch, tmp_path):
     assert _git(home / "plugins" / "demo", "rev-parse", "HEAD") == old_sha
 
 
+def _subdir_plugin_repo(root: Path, name: str = "demo") -> Path:
+    """A monorepo with the plugin under ``./plugin-dir/`` and unrelated root noise,
+    matching the layout Hermes's `repo#subdir` install syntax targets."""
+    repo = root / "monorepo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "fixture@example.com")
+    _git(repo, "config", "user.name", "Fixture")
+    (repo / "README.md").write_text("root noise\n", encoding="utf-8")
+    plugin_dir = repo / "plugin-dir"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        yaml.safe_dump({"name": name, "version": "1.0.0"}), encoding="utf-8"
+    )
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "init")
+    return repo
+
+
+def test_dashboard_update_after_subdir_install(monkeypatch, tmp_path):
+    """The dashboard's updater ('Update' button) must handle a subdir install the
+    same way the CLI does -- both route through the shared `_pull_plugin_update`."""
+    from hermes_cli.plugins_cmd import _install_plugin_core, dashboard_update_user_plugin
+
+    repo = _subdir_plugin_repo(tmp_path)
+    home = tmp_path / "home"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    _install_plugin_core(f"{repo.as_uri()}#plugin-dir", force=False)
+    target = home / "plugins" / "demo"
+    assert not (target / ".git").exists()
+
+    (repo / "plugin-dir" / "plugin.yaml").write_text(
+        yaml.safe_dump({"name": "demo", "version": "1.1.0"}), encoding="utf-8"
+    )
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "bump version")
+
+    result = dashboard_update_user_plugin("demo")
+
+    assert result["ok"] is True
+    assert result["unchanged"] is False
+    assert not (target / ".git").exists()
+    assert not (target / "README.md").exists()
+    assert yaml.safe_load((target / "plugin.yaml").read_text())["version"] == "1.1.0"
+
+    again = dashboard_update_user_plugin("demo")
+    assert again["ok"] is True
+    assert again["unchanged"] is True
+
+
 def test_failed_force_reinstall_keeps_existing_plugin_and_metadata(
     monkeypatch, tmp_path
 ):

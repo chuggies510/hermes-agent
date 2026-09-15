@@ -623,8 +623,14 @@ def _install_plugin_core(
     force: bool,
     ref: Optional[str] = None,
     scan_decision_cb=None,
+    expected_name: Optional[str] = None,
 ) -> tuple[Path, dict, str]:
-    """Clone a Git plugin and atomically record its source and exact revision."""
+    """Clone a Git plugin and atomically record its source and exact revision.
+    *expected_name*, when given, refuses -- before anything is cloned into place --
+    to install under any other resolved plugin name. Used by plugin updates: a
+    `force=True` reinstall must only ever replace the plugin being updated, never
+    collide with (and silently overwrite) an unrelated plugin that happens to occupy
+    a name the source's manifest started declaring instead."""
     requested_revision = _normalize_exact_revision(ref) if ref is not None else None
     try:
         git_url, subdir = _resolve_git_url(identifier)
@@ -653,6 +659,11 @@ def _install_plugin_core(
             target = _sanitize_plugin_name(plugin_name, plugins_dir)
         except ValueError as e:
             raise PluginOperationError(str(e)) from e
+        if expected_name is not None and plugin_name != expected_name:
+            raise PluginOperationError(
+                f"Refusing to update '{expected_name}': its source now declares a "
+                f"different manifest name ('{plugin_name}'). Reinstall explicitly with "
+                f"`hermes plugins install {identifier} --force` to accept the rename.")
         _check_manifest_version(manifest, plugin_name)
         # Scan BEFORE anything is moved into place; raises PluginScanBlocked when blocked.
         _scan_plugin_tree(tmp_target, identifier, force=force, scan_decision_cb=scan_decision_cb)
@@ -767,15 +778,32 @@ def cmd_install(
 
 
 def _pull_plugin_update(target: Path, pinned_msg, not_git_msg, before_pull=None) -> str:
-    """Shared ``update`` core: refuse pinned / non-git checkouts, ``git pull``, record the new
-    revision. Returns the pull output; raises :class:`PluginOperationError` on any refusal.
+    """Shared ``update`` core for both the CLI (`cmd_update`) and the dashboard
+    (`dashboard_update_user_plugin`): refuse pinned checkouts, then either ``git pull``
+    (regular installs) or re-run the fresh-clone + subdir-extract + re-scan + swap
+    pipeline install/catalog re-pin already use (subdir installs, which have no
+    ``.git`` in the swapped-in target by construction -- its ``.git`` lives at the
+    monorepo root, a sibling of the extracted subdir, not inside it). Returns the
+    pull/update output; raises :class:`PluginOperationError` on any refusal.
     *pinned_msg(install_record)* / *not_git_msg()* build the caller-specific error text."""
     metadata = _read_install_metadata()
     install_record = metadata.get(target.name, {})
     if install_record.get("pinned") is True:
         raise PluginOperationError(pinned_msg(install_record))
     if not (target / ".git").exists():
-        raise PluginOperationError(not_git_msg())
+        source = install_record.get("source")
+        subdir = _resolve_git_url(source)[1] if source else None
+        if not subdir:
+            raise PluginOperationError(not_git_msg())
+        if before_pull is not None:
+            before_pull()
+        old_revision = install_record.get("revision")
+        # expected_name refuses -- before anything is cloned into place -- to let a
+        # drifted manifest name overwrite (or collide with) a different plugin.
+        _install_plugin_core(source, force=True, expected_name=target.name)
+        new_revision = _read_install_metadata().get(target.name, {}).get("revision")
+        return ("Already up to date." if new_revision == old_revision
+                else "Updated (subdirectory source re-fetched).")
     if before_pull is not None:
         before_pull()
     ok, output = _git_pull_plugin_dir(target)

@@ -797,6 +797,184 @@ class TestSubdirInstallE2E:
         assert target == (plugins_dir / "portable.test").resolve()
         assert pc._resolve_plugin_key("portable.test") == "portable.test"
 
+    def test_update_after_subdir_install(self, tmp_path, monkeypatch):
+        """A subdir install has no .git in the swapped-in target by construction (the
+        clone's .git lives at the monorepo root, a sibling of the extracted subdir).
+        `cmd_update` must recognize that and re-run the same fresh-clone +
+        subdir-extract + re-scan + swap pipeline install/catalog re-pin already use,
+        instead of treating the missing .git as "not installed from git"."""
+        if shutil.which("git") is None:
+            pytest.skip("git not available")
+
+        import subprocess as sp
+        from hermes_cli import plugins_cmd as pc
+
+        repo_root = tmp_path / "monorepo"
+        self._make_repo_with_subdir_plugin(repo_root)
+
+        plugins_dir = tmp_path / "installed"
+        plugins_dir.mkdir()
+        monkeypatch.setattr(pc, "_plugins_dir", lambda: plugins_dir)
+        monkeypatch.setattr(pc, "_console", lambda: __import__("rich.console", fromlist=["Console"]).Console())
+
+        identifier = f"file://{repo_root}#my-plugin"
+        target, manifest, name = pc._install_plugin_core(identifier, force=False)
+        assert (target / "plugin.yaml").read_text().count("A subdir plugin") == 1
+
+        # A second upstream commit changes the plugin's content.
+        env = {
+            **os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+        }
+        (repo_root / "my-plugin" / "plugin.yaml").write_text(
+            "name: my-plugin\nmanifest_version: 1\ndescription: An updated subdir plugin\n",
+            encoding="utf-8",
+        )
+        sp.run(["git", "add", "-A"], cwd=repo_root, check=True, env=env)
+        sp.run(["git", "commit", "-q", "-m", "update plugin"], cwd=repo_root, check=True, env=env)
+
+        pc.cmd_update(name)
+
+        assert "An updated subdir plugin" in (target / "plugin.yaml").read_text()
+        # Repo-root noise is still excluded after update, same invariant as install.
+        assert not (target / "README.md").exists()
+        assert not (target / "tests").exists()
+        metadata = pc._read_install_metadata()
+        assert metadata[name]["revision"] == pc._git_head_revision(repo_root, pc._resolve_git_executable())
+
+    def test_update_after_pinned_subdir_install_refuses(self, tmp_path, monkeypatch):
+        """A pinned subdir install must still refuse to move on update, exactly like a
+        pinned non-subdir install."""
+        if shutil.which("git") is None:
+            pytest.skip("git not available")
+
+        from hermes_cli import plugins_cmd as pc
+
+        repo_root = tmp_path / "monorepo"
+        self._make_repo_with_subdir_plugin(repo_root)
+        pinned_sha = pc._git_head_revision(repo_root, pc._resolve_git_executable())
+
+        plugins_dir = tmp_path / "installed"
+        plugins_dir.mkdir()
+        monkeypatch.setattr(pc, "_plugins_dir", lambda: plugins_dir)
+        monkeypatch.setattr(pc, "_console", lambda: __import__("rich.console", fromlist=["Console"]).Console())
+
+        identifier = f"file://{repo_root}#my-plugin"
+        target, manifest, name = pc._install_plugin_core(identifier, force=False, ref=pinned_sha)
+        assert pc._read_install_metadata()[name]["pinned"] is True
+
+        with pytest.raises(SystemExit):
+            pc.cmd_update(name)
+
+    def test_update_after_subdir_manifest_rename_aborts_without_stray_dir(
+        self, tmp_path, monkeypatch
+    ):
+        """If the source's manifest name drifts between updates, `_install_plugin_core`
+        (name-driven) would otherwise create a second plugin directory under the new
+        name. The `expected_name` guard aborts before anything is cloned into place,
+        so no stray directory is ever created in the first place."""
+        if shutil.which("git") is None:
+            pytest.skip("git not available")
+
+        import subprocess as sp
+        from hermes_cli import plugins_cmd as pc
+
+        repo_root = tmp_path / "monorepo"
+        self._make_repo_with_subdir_plugin(repo_root)
+
+        plugins_dir = tmp_path / "installed"
+        plugins_dir.mkdir()
+        monkeypatch.setattr(pc, "_plugins_dir", lambda: plugins_dir)
+        monkeypatch.setattr(pc, "_console", lambda: __import__("rich.console", fromlist=["Console"]).Console())
+
+        identifier = f"file://{repo_root}#my-plugin"
+        target, manifest, name = pc._install_plugin_core(identifier, force=False)
+        original_content = (target / "plugin.yaml").read_text()
+
+        env = {
+            **os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+        }
+        (repo_root / "my-plugin" / "plugin.yaml").write_text(
+            "name: renamed-plugin\nmanifest_version: 1\ndescription: Renamed\n",
+            encoding="utf-8",
+        )
+        sp.run(["git", "add", "-A"], cwd=repo_root, check=True, env=env)
+        sp.run(["git", "commit", "-q", "-m", "rename"], cwd=repo_root, check=True, env=env)
+
+        with pytest.raises(SystemExit):
+            pc.cmd_update(name)
+
+        # The original plugin is untouched, and no stray "renamed-plugin" dir survives.
+        assert (target / "plugin.yaml").read_text() == original_content
+        assert not (plugins_dir / "renamed-plugin").exists()
+        assert [p.name for p in plugins_dir.iterdir()] == ["my-plugin"]
+
+    def test_update_after_subdir_manifest_rename_never_touches_a_colliding_plugin(
+        self, tmp_path, monkeypatch
+    ):
+        """The abort must happen BEFORE anything is cloned into place: if the drifted
+        name collides with a different, unrelated, already-installed plugin, that
+        plugin's directory and metadata must survive completely untouched -- not get
+        overwritten and then (attempted to be) cleaned back up."""
+        if shutil.which("git") is None:
+            pytest.skip("git not available")
+
+        import subprocess as sp
+        from hermes_cli import plugins_cmd as pc
+
+        repo_root = tmp_path / "monorepo"
+        self._make_repo_with_subdir_plugin(repo_root)
+
+        plugins_dir = tmp_path / "installed"
+        plugins_dir.mkdir()
+        monkeypatch.setattr(pc, "_plugins_dir", lambda: plugins_dir)
+        monkeypatch.setattr(pc, "_console", lambda: __import__("rich.console", fromlist=["Console"]).Console())
+
+        # An unrelated, unpinned plugin already occupies the name the source is
+        # about to rename itself to.
+        other_dir = plugins_dir / "renamed-plugin"
+        other_dir.mkdir()
+        (other_dir / "plugin.yaml").write_text(
+            "name: renamed-plugin\nmanifest_version: 1\ndescription: Unrelated\n",
+            encoding="utf-8",
+        )
+        (other_dir / "marker.txt").write_text("do not touch\n", encoding="utf-8")
+        metadata_before = {
+            "renamed-plugin": {"pinned": False, "revision": "deadbeef" * 5, "source": "https://example.invalid/other"},
+        }
+        pc._write_install_metadata(metadata_before)
+
+        identifier = f"file://{repo_root}#my-plugin"
+        target, manifest, name = pc._install_plugin_core(identifier, force=False)
+        # Snapshot AFTER installing "my-plugin" (which also rewrites the shared
+        # metadata file to add its own entry) -- this is the state immediately
+        # before the update-that-must-abort, not before "renamed-plugin" existed.
+        other_dir_bytes_before = {p.name: p.read_bytes() for p in sorted(other_dir.iterdir())}
+        metadata_bytes_before = pc._install_metadata_path().read_bytes()
+
+        env = {
+            **os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+        }
+        (repo_root / "my-plugin" / "plugin.yaml").write_text(
+            "name: renamed-plugin\nmanifest_version: 1\ndescription: Renamed\n",
+            encoding="utf-8",
+        )
+        sp.run(["git", "add", "-A"], cwd=repo_root, check=True, env=env)
+        sp.run(["git", "commit", "-q", "-m", "rename"], cwd=repo_root, check=True, env=env)
+
+        with pytest.raises(SystemExit):
+            pc.cmd_update(name)
+
+        # The unrelated plugin under the colliding name is byte-for-byte untouched,
+        # not merely semantically equivalent.
+        other_dir_bytes_after = {p.name: p.read_bytes() for p in sorted(other_dir.iterdir())}
+        assert other_dir_bytes_after == other_dir_bytes_before
+        assert pc._install_metadata_path().read_bytes() == metadata_bytes_before
+        # The plugin being updated is also untouched.
+        assert (target / "plugin.yaml").read_text().count("A subdir plugin") == 1
+
 
 def test_portable_manifest_is_visible_to_plugin_cli(tmp_path):
     import json
