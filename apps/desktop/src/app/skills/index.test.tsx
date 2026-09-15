@@ -284,6 +284,46 @@ describe('SkillsView toolset management', { timeout: 60_000 }, () => {
     expect(await screen.findByText(/Deep research steps/)).toBeTruthy()
   })
 
+  it('renders plugin skills as read-only and loads their qualified detail content', async () => {
+    getSkills.mockResolvedValue([
+      {
+        name: 'meap:using-meap',
+        description: 'Use MEAP',
+        category: 'plugin',
+        enabled: true,
+        usage: 0,
+        provenance: 'plugin'
+      }
+    ])
+    getSkillContent.mockResolvedValue({
+      name: 'meap:using-meap',
+      path: '/plugins/meap/skills/using-meap/SKILL.md',
+      content: '---\nname: using-meap\n---\n\nPlugin detail body.'
+    })
+
+    await act(async () => {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter initialEntries={['/skills?tab=skills']}>
+            <SkillsView />
+          </MemoryRouter>
+        </QueryClientProvider>
+      )
+    })
+
+    expect((await screen.findAllByText('meap:using-meap')).length).toBeGreaterThan(0)
+    const search = screen.getByRole('textbox', { name: 'Search skills...' })
+    fireEvent.change(search, { target: { value: 'using-meap' } })
+    expect((await screen.findAllByText('meap:using-meap')).length).toBeGreaterThan(0)
+    fireEvent.change(search, { target: { value: 'meap:using-meap' } })
+    expect((await screen.findAllByText('meap:using-meap')).length).toBeGreaterThan(0)
+    expect((await screen.findAllByText('Plugin · read-only')).length).toBe(2)
+    await waitFor(() => expect(getSkillContent).toHaveBeenCalledWith('meap:using-meap', 'default'))
+    expect(await screen.findByText(/Plugin detail body/)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Archive' })).toBeNull()
+  })
+
   it('hub picker refuses to reinstall an already-installed skill', async () => {
     const { notify } = await import('@/store/notifications')
     const { EmbeddedHubPicker } = await import('./embedded-hub-picker')

@@ -22,6 +22,33 @@ def _write_skill(skills_dir, name, description="test skill"):
     )
 
 
+def _write_plugin_skill(home, platform):
+    plugin_dir = home / "plugins" / "skills_probe"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "plugin.yaml").write_text(
+        yaml.safe_dump({"name": "skills_probe", "version": "0.1.0", "description": "skills API probe"}),
+        encoding="utf-8",
+    )
+    for name in ("visible", "disabled", "incompatible"):
+        skill_dir = plugin_dir / "skills" / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {name} plugin skill\n---\n\n{name} body.\n",
+            encoding="utf-8",
+        )
+    (plugin_dir / "__init__.py").write_text(
+        "from pathlib import Path\n"
+        "def register(ctx):\n"
+        "    root = Path(__file__).parent / 'skills'\n"
+        "    ctx.register_skill('visible', root / 'visible' / 'SKILL.md', 'visible plugin skill')\n"
+        "    ctx.register_skill('disabled', root / 'disabled' / 'SKILL.md', 'disabled plugin skill')\n"
+        "    ctx.register_skill(\n"
+        "        'incompatible', root / 'incompatible' / 'SKILL.md',\n"
+        f"        'incompatible plugin skill', frontmatter={{'platforms': [{platform!r}]}})\n",
+        encoding="utf-8",
+    )
+
+
 @pytest.fixture
 def isolated_profiles(tmp_path, monkeypatch, _isolate_hermes_home):
     """Isolated default home + one named profile, each with its own skills."""
@@ -37,6 +64,20 @@ def isolated_profiles(tmp_path, monkeypatch, _isolate_hermes_home):
 
     _write_skill(default_home / "skills", "dashboard-skill")
     _write_skill(worker_home / "skills", "worker-skill")
+
+    import sys
+
+    incompatible_platform = "linux" if sys.platform == "darwin" else "macos"
+    _write_plugin_skill(worker_home, incompatible_platform)
+    (worker_home / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "plugins": {"enabled": ["skills_probe"]},
+                "skills": {"disabled": ["skills_probe:disabled"]},
+            }
+        ),
+        encoding="utf-8",
+    )
 
     monkeypatch.setattr(profiles, "_get_default_hermes_home", lambda: default_home)
     monkeypatch.setattr(profiles, "_get_profiles_root", lambda: profiles_root)
@@ -66,6 +107,48 @@ def _load_cfg(home):
 
 class TestProfileScopedSkills:
 
+    def test_list_and_content_include_only_eligible_plugin_skills_for_target_profile(
+        self, client, isolated_profiles
+    ):
+        response = client.get("/api/skills", params={"profile": "worker_alpha"})
+        assert response.status_code == 200
+        rows = {row["name"]: row for row in response.json()}
+        assert rows["worker-skill"]["provenance"] == "agent"
+        assert rows["skills_probe:visible"] == {
+            "name": "skills_probe:visible",
+            "description": "visible plugin skill",
+            "category": "plugin",
+            "enabled": True,
+            "usage": 0,
+            "provenance": "plugin",
+        }
+        assert "skills_probe:disabled" not in rows
+        assert "skills_probe:incompatible" not in rows
+
+        # Qualified plugin resolution wins over a categorized local skill with
+        # the same ``namespace:name`` lookup spelling, matching skill_view.
+        shadow = isolated_profiles["worker_alpha"] / "skills" / "skills_probe" / "visible"
+        shadow.mkdir(parents=True)
+        (shadow / "SKILL.md").write_text(
+            "---\nname: visible\n---\n\nlocal shadow body.\n", encoding="utf-8"
+        )
+        content = client.get(
+            "/api/skills/content",
+            params={"profile": "worker_alpha", "name": "skills_probe:visible"},
+        )
+        assert content.status_code == 200
+        assert content.json()["name"] == "skills_probe:visible"
+        assert "visible body." in content.json()["content"]
+        assert "local shadow body." not in content.json()["content"]
+
+        default_rows = client.get("/api/skills").json()
+        assert all(row["name"] != "skills_probe:visible" for row in default_rows)
+
+        missing = client.get(
+            "/api/skills/content",
+            params={"profile": "worker_alpha", "name": "skills_probe:missing"},
+        )
+        assert missing.status_code == 404
 
     def test_toggle_writes_into_target_profile_only(self, client, isolated_profiles):
         resp = client.put(

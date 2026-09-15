@@ -137,6 +137,11 @@ function skillSubtitle(skill: SkillInfo): React.ReactNode {
           hub
         </Badge>
       )}
+      {provenance === 'plugin' && (
+        <Badge className="shrink-0 normal-case" variant="muted">
+          Plugin · read-only
+        </Badge>
+      )}
     </>
   )
 }
@@ -1222,7 +1227,7 @@ function SkillDetail({
             <PanelPill>{prettyName(categoryFor(skill))}</PanelPill>
             {skill.provenance && skill.provenance !== 'bundled' && (
               <PanelPill tone={skill.provenance === 'agent' ? 'good' : 'muted'}>
-                {t.skills.provenance[skill.provenance]}
+                {skill.provenance === 'plugin' ? 'Plugin · read-only' : t.skills.provenance[skill.provenance]}
               </PanelPill>
             )}
           </>
