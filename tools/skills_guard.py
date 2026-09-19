@@ -17,8 +17,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Tuple
 
+from tools.skills_guard_prose import PROSE_PATTERN_IDS, defensive_match
 
-SCANNER_VERSION = "skills-guard-v5"
+
+SCANNER_VERSION = "skills-guard-v6"
 
 # NVIDIA-verified skills each ship a signed `skill.oms.sig` + governance `skill-card.md`.
 TRUSTED_REPOS = {"openai/skills", "anthropics/skills", "huggingface/skills", "NVIDIA/skills"}
@@ -184,7 +186,7 @@ THREAT_PATTERNS = [
     (r'disregard\s+(?:\w+\s+)*(your|all|any)\s+(?:\w+\s+)*(instructions|rules|guidelines)',
      "disregard_rules", "critical", "injection", "instructs agent to disregard its rules"),
     (r'output\s+(?:\w+\s+)*(system|initial)\s+prompt',
-     "leak_system_prompt", "high", "injection", "attempts to extract the system prompt"),
+     "leak_system_prompt", "critical", "injection", "attempts to extract the system prompt"),
     (r'(when|if)\s+no\s*one\s+is\s+(watching|looking)',
      "conditional_deception", "high", "injection", "conditional instruction to behave differently when unobserved"),
     (r'act\s+as\s+(if|though)\s+(?:\w+\s+)*you\s+(?:\w+\s+)*(have\s+no|don\'t\s+have)\s+(?:\w+\s+)*(restrictions|limits|rules)',
@@ -528,13 +530,12 @@ _FENCE_LINE = re.compile(r"^ {0,3}(?P<marker>`{3,}|~{3,})(?P<info>.*)$")
 _CONTAINER_PREFIX = re.compile(r"^(?: {0,3}(?:>|(?:[-*+]|\d{1,9}[.)]) {1,4}))+")
 
 
-def _mask_prose_link_destinations(lines: List[str]) -> List[str]:
-    """Mask link destinations only in Markdown prose. Inside a fenced or indented code block a
-    ``[x](../..)`` is an argument to whatever command surrounds it, not a hyperlink, so those lines
-    scan verbatim. Fence state is ``(marker_char, opener_length)`` rather than a bool so a
+def _markdown_prose_lines(lines: List[str]) -> List[bool]:
+    """Identify prose, never treating fenced or indented code as inert documentation.
+    Fence state is ``(marker_char, opener_length)`` rather than a bool so a
     mismatched fence line cannot drop the scanner back into prose mode; an unclosed fence stays
     code to EOF (fail-safe)."""
-    out: List[str] = []
+    out: List[bool] = []
     fence = None  # (marker char, opener length) while a fenced block is open
     for line in lines:
         match = _FENCE_LINE.match(_CONTAINER_PREFIX.sub("", line))
@@ -547,8 +548,14 @@ def _mask_prose_link_destinations(lines: List[str]) -> List[str]:
             if match and not (match["marker"][0] == "`" and "`" in match["info"]):
                 fence = (match["marker"][0], len(match["marker"]))
             code = fence is not None or line.startswith(("\t", "    "))  # indented code block (§4.4)
-        out.append(line if code else _mask_markdown_link_destinations(line))
+        out.append(not code)
     return out
+
+
+def _mask_prose_link_destinations(lines: List[str]) -> List[str]:
+    """Mask link destinations only in Markdown prose, never in code arguments."""
+    return [_mask_markdown_link_destinations(line) if prose else line
+            for line, prose in zip(lines, _markdown_prose_lines(lines))]
 
 
 def scan_file(file_path: Path, rel_path: str = "") -> List[Finding]:
@@ -565,10 +572,15 @@ def scan_file(file_path: Path, rel_path: str = "") -> List[Finding]:
     docstring_lines = _compute_docstring_lines(lines)  # so code patterns don't fire on prose
     traversal_lines = _mask_prose_link_destinations(lines) if file_path.suffix.lower() == ".md" else lines
     suffix, owners = file_path.suffix.lower(), _statement_owners(lines)  # per-file context for the demotion
+    prose_lines = _markdown_prose_lines(lines) if suffix == ".md" else [False] * len(lines)
     for pattern, pid, severity, category, description in _COMPILED_THREAT_PATTERNS:
         for i, line in enumerate(lines, start=1):
             scan_line = traversal_lines[i - 1] if pid in _PATH_TRAVERSAL_PATTERN_IDS else line
-            if i not in docstring_lines and pattern.search(scan_line):
+            matches = pattern.finditer(scan_line)
+            if pid in PROSE_PATTERN_IDS and prose_lines[i - 1]:
+                previous = lines[i - 2] if i > 1 and prose_lines[i - 2] else ""
+                matches = (m for m in matches if not defensive_match(line, m, previous))
+            if i not in docstring_lines and next(matches, None) is not None:
                 text = line.strip()
                 line_severity, line_description = _demote_inert_path_reference(
                     pid, severity, description, line, lines[owners[i - 1]], suffix)

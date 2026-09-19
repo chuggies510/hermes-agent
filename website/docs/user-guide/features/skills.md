@@ -852,6 +852,17 @@ Trust level is always `community` — the same security scan runs as for every o
 
 All hub-installed skills go through a **security scanner** that checks for data exfiltration, prompt injection, destructive commands, supply-chain signals, and other threats.
 
+The shared skill/plugin scanner distinguishes a small set of explicit defensive
+Markdown forms from operative prompt-injection instructions. Direct negative
+imperatives and closed, quoted `e.g.` examples governed by rejection language
+are non-operative; quotes or an "example" label alone are not exemptions. This
+recognition is match-local, limited to Markdown prose (not code blocks), and
+fails closed for unsupported grammar or override clauses. Other matches on the
+same line remain scannable. Operative system-prompt extraction instructions are
+critical, just like instruction-override directives, and remain non-overridable.
+Static scanning is heuristic, not a proof that natural-language content is safe;
+review the complete package before installing it.
+
 `hermes skills inspect ...` now also surfaces upstream metadata when available:
 - repo URL
 - skills.sh detail page URL
