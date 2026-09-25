@@ -17,13 +17,13 @@ from typing import Iterator, List, Optional, Tuple
 
 from tools.plugin_guard_context import (
     STEP_DOWN, is_agent_facing, is_base64_media, is_ci_workflow, is_data_decode, is_doc_prose,
-    is_inert_fixture_line, is_loopback_only, is_pip_install_in_prose_literal, is_regex_alternation_token,
-    is_self_uninstall_doc, is_test_tree, prose_cap)
+    is_in_package_traversal, is_inert_fixture_line, is_loopback_only, is_pip_install_in_prose_literal,
+    is_regex_alternation_token, is_self_uninstall_doc, is_test_tree, prose_cap)
 from tools.skills_guard import (
     Finding, ScanResult, SUSPICIOUS_BINARY_EXTENSIONS, _determine_verdict, format_scan_report,
     scan_file)
 
-PLUGIN_SCANNER_VERSION = "plugin-guard-v8"
+PLUGIN_SCANNER_VERSION = "plugin-guard-v9"
 
 # Never scanned: VCS internals, caches, vendored envs.
 EXCLUDED_DIRS = {
@@ -236,6 +236,8 @@ def _context_severity(f: Finding, rel_path: str, line: str, doc_prose: bool, is_
         sev = "low"    # 127.0.0.0/8 is a local service, not egress
     if is_code and is_pip_install_in_prose_literal(f, line):
         sev = "low"    # "no pip install is needed" in a user-facing message
+    if is_in_package_traversal(f, line, rel_path):
+        sev = "low"    # "../../../data/x.json" that resolves inside the plugin
     return sev
 
 

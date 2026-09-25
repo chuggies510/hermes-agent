@@ -666,3 +666,29 @@ class TestIntakeFalsePositiveClasses:
         result = scan_plugin(_mk_plugin(tmp_path, files), source="owner/repo")
         sev = {f.file: f.severity for f in result.findings if f.pattern_id == "hardcoded_ip_port"}
         assert sev == {"README.md": "medium", "__init__.py": "medium"}
+
+
+class TestInPackageRelativeTraversal:
+    """A ``../../..`` literal that, resolved against its own file's directory, stays inside the
+    plugin root is an in-package import (``lib/domain/x.ts`` reading ``data/taxonomy.json``),
+    not traversal. One that climbs above the plugin root keeps ``high``."""
+
+    def test_in_package_import_is_a_note_and_the_plugin_is_safe(self, tmp_path):
+        files = dict(BASE_FILES)
+        files["plugin/lib/domain/order.ts"] = (
+            "import taxonomy from '../../../data/taxonomy.json';\n"
+            "const p = path.resolve(import.meta.dir, '../../../data/cost/ppi.yaml');\n"
+        )
+        result = scan_plugin(_mk_plugin(tmp_path, files), source="owner/repo")
+        sev = {f.line: f.severity for f in result.findings if f.pattern_id == "path_traversal_deep"}
+        assert sev == {1: "low", 2: "low"}      # still reported, informational
+        assert result.verdict == "safe"
+
+    def test_traversal_escaping_the_plugin_root_keeps_caution(self, tmp_path):
+        files = dict(BASE_FILES)
+        files["plugin/lib/domain/order.ts"] = "import x from '../../../../data/x.json';\n"
+        files["tool.py"] = "open('../../../../../etc/hosts')\n"
+        result = scan_plugin(_mk_plugin(tmp_path, files), source="owner/repo")
+        sev = {f.file: f.severity for f in result.findings if f.pattern_id == "path_traversal_deep"}
+        assert sev == {"plugin/lib/domain/order.ts": "high", "tool.py": "high"}
+        assert result.verdict == "caution"

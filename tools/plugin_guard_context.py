@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import posixpath
 import re
 from pathlib import Path
 from typing import Optional
@@ -283,9 +284,39 @@ def is_pip_install_in_prose_literal(finding: Finding, line: str) -> bool:
     return bool(hits) and all(prose(h) for h in hits)
 
 
+
+# ── (9) in-package relative path ─────────────────────────────────────────────────────────────
+# ``path_traversal(_deep)`` fires on ``../..`` alone, so ``lib/domain/x.ts`` importing
+# ``'../../../data/taxonomy.json'`` scores like an escape. Resolved against its own file's
+# directory, that literal names a file inside the plugin. When every traversal on the line sits
+# in a quoted relative literal that stays inside the plugin root, the finding is informational.
+# An unquoted traversal, an absolute or interpolated literal, or one climbing above the root
+# keeps the pattern's severity.
+_RELATIVE_PATH_LITERAL = re.compile(r"(?:\.\.?/)+[\w.@+\-/]*")
+_QUOTED_LITERAL = re.compile(r"""(['"`])([^'"`\n]*)\1""")
+
+
+def is_in_package_traversal(finding: Finding, line: str, rel_path: str) -> bool:
+    """Every ``../..`` on the line is a relative literal resolving inside the plugin root."""
+    rx = _PATTERN_BY_ID.get(finding.pattern_id)
+    if finding.pattern_id not in {"path_traversal", "path_traversal_deep"} or rx is None:
+        return False
+    base = posixpath.dirname(rel_path)
+
+    def inside(m: "re.Match[str]") -> str:
+        lit = m.group(2)
+        resolved = posixpath.normpath(posixpath.join(base, lit))
+        ok = _RELATIVE_PATH_LITERAL.fullmatch(lit) and resolved.split("/")[0] != ".."
+        return "" if ok else m.group(0)
+
+    rest = _QUOTED_LITERAL.sub(inside, line)
+    return rest != line and not rx.search(rest)
+
+
 __all__ = [
     "STEP_DOWN", "DOC_PROSE_EXTENSIONS", "TEST_TREE_DIRS", "LITERAL_INERT_PATTERN_IDS",
     "is_doc_prose", "is_ci_workflow", "is_agent_facing", "prose_cap", "is_self_uninstall_doc", "is_test_tree",
     "is_inert_fixture_line", "is_base64_media",
     "is_regex_alternation_token", "is_data_decode", "is_loopback_only", "is_pip_install_in_prose_literal",
+    "is_in_package_traversal",
 ]
