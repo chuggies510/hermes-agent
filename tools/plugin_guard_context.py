@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import posixpath
 import re
 from pathlib import Path
 from typing import Optional
@@ -287,30 +286,36 @@ def is_pip_install_in_prose_literal(finding: Finding, line: str) -> bool:
 
 # ── (9) in-package relative path ─────────────────────────────────────────────────────────────
 # ``path_traversal(_deep)`` fires on ``../..`` alone, so ``lib/domain/x.ts`` importing
-# ``'../../../data/taxonomy.json'`` scores like an escape. Resolved against its own file's
-# directory, that literal names a file inside the plugin. When every traversal on the line sits
-# in a quoted relative literal that stays inside the plugin root, the finding is informational.
-# An unquoted traversal, an absolute or interpolated literal, or one climbing above the root
-# keeps the pattern's severity.
-_RELATIVE_PATH_LITERAL = re.compile(r"(?:\.\.?/)+[\w.@+\-/]*")
-_QUOTED_LITERAL = re.compile(r"""(['"`])([^'"`\n]*)\1""")
+# ``'../../../data/taxonomy.json'`` scores like an escape. Only two whole-line shapes are
+# demoted, because only there the literal is provably resolved against its own file's directory
+# and nothing else on the line can change the path: a static module specifier, and
+# ``const p = path.resolve|join(import.meta.dir, '<literal>')``. The literal is then resolved on
+# the real filesystem (symlinks followed) and must land inside the plugin root. Anything else,
+# including concatenation, extra arguments or another base, keeps the pattern's severity.
+_MODULE_SPECIFIER_LINE = re.compile(
+    r"""(?:(?:import|export)\b[^'"`;]*?\bfrom\s*(['"])([^'"`]+)\1|import\s*(['"])([^'"`]+)\3)\s*;?""")
+_OWN_DIR_RESOLVE_LINE = re.compile(
+    r"""(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*(?:path\.)?(?:resolve|join)\(\s*import\.meta\.dir\s*,"""
+    r"""\s*(['"])([^'"`]+)\1\s*\)\s*;?""")
+_PLAIN_RELATIVE_LITERAL = re.compile(r"(?:\.\./)+[A-Za-z0-9_.@+\-/]*")
 
 
-def is_in_package_traversal(finding: Finding, line: str, rel_path: str) -> bool:
-    """Every ``../..`` on the line is a relative literal resolving inside the plugin root."""
-    rx = _PATTERN_BY_ID.get(finding.pattern_id)
-    if finding.pattern_id not in {"path_traversal", "path_traversal_deep"} or rx is None:
+def is_in_package_traversal(finding: Finding, line: str, rel_path: str, file_path: Path) -> bool:
+    """The whole line is one module specifier or own-directory resolve whose relative literal,
+    resolved on disk, stays inside the plugin root."""
+    if finding.pattern_id not in {"path_traversal", "path_traversal_deep"}:
         return False
-    base = posixpath.dirname(rel_path)
-
-    def inside(m: "re.Match[str]") -> str:
-        lit = m.group(2)
-        resolved = posixpath.normpath(posixpath.join(base, lit))
-        ok = _RELATIVE_PATH_LITERAL.fullmatch(lit) and resolved.split("/")[0] != ".."
-        return "" if ok else m.group(0)
-
-    rest = _QUOTED_LITERAL.sub(inside, line)
-    return rest != line and not rx.search(rest)
+    m = _MODULE_SPECIFIER_LINE.fullmatch(line.strip()) or _OWN_DIR_RESOLVE_LINE.fullmatch(line.strip())
+    literal = m.group(m.lastindex) if m else ""
+    if not _PLAIN_RELATIVE_LITERAL.fullmatch(literal):
+        return False
+    depth = len(Path(rel_path).parts)
+    try:
+        root = file_path.parents[depth - 1].resolve()
+        target = (file_path.parent / literal).resolve()
+    except (IndexError, OSError, RuntimeError):
+        return False
+    return target.is_relative_to(root)
 
 
 __all__ = [

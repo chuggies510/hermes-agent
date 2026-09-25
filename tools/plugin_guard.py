@@ -175,6 +175,8 @@ def _filter_findings(findings: List[Finding], rel_path: str, file_path: Path) ->
             f.severity = DOC_PROSE_DEMOTIONS[f.pattern_id]
         line = lines[f.line - 1] if 0 < f.line <= len(lines) else f.match
         f.severity = _context_severity(f, rel_path, line, doc_prose, is_code)
+        if is_in_package_traversal(f, line, rel_path, file_path):
+            f.severity = "low"    # "../../../data/x.json" that resolves inside the plugin
         if _is_defensive_documentation(f, rel_path):
             f.severity = _comment_severity(f)
         # Last and critical-only: a one-step cap that can never re-raise a finding an
@@ -236,8 +238,6 @@ def _context_severity(f: Finding, rel_path: str, line: str, doc_prose: bool, is_
         sev = "low"    # 127.0.0.0/8 is a local service, not egress
     if is_code and is_pip_install_in_prose_literal(f, line):
         sev = "low"    # "no pip install is needed" in a user-facing message
-    if is_in_package_traversal(f, line, rel_path):
-        sev = "low"    # "../../../data/x.json" that resolves inside the plugin
     return sev
 
 

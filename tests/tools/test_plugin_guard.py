@@ -692,3 +692,28 @@ class TestInPackageRelativeTraversal:
         sev = {f.file: f.severity for f in result.findings if f.pattern_id == "path_traversal_deep"}
         assert sev == {"plugin/lib/domain/order.ts": "high", "tool.py": "high"}
         assert result.verdict == "caution"
+
+    @pytest.mark.parametrize("line", [
+        "const p = path.resolve('/tmp', '../../../data/x.json');",                       # another base
+        "const p = path.resolve(import.meta.dir, '../../../data/x.json', '/tmp/outside');",  # later absolute arg
+        "const p = path.resolve(import.meta.dir, '../../../data' + '/..' + '/..' + '/..' + '/tmp/outside');",
+        "import x from '../../../data/x.json'; fs.readFileSync('../../../../../etc/hosts');",
+    ])
+    def test_constructed_or_rebased_path_keeps_caution(self, tmp_path, line):
+        files = dict(BASE_FILES)
+        files["plugin/lib/domain/order.ts"] = line + "\n"
+        result = scan_plugin(_mk_plugin(tmp_path, files), source="owner/repo")
+        sev = {f.severity for f in result.findings if f.pattern_id == "path_traversal_deep"}
+        assert sev == {"high"}
+        assert result.verdict == "caution"
+
+    def test_escape_through_an_internal_symlink_keeps_caution(self, tmp_path):
+        files = dict(BASE_FILES)
+        files["plugin/lib/domain/order.ts"] = "import x from '../../../data/link/../..';\n"
+        files["data/keep.json"] = "{}\n"
+        plugin = _mk_plugin(tmp_path, files)
+        (plugin / "data" / "link").symlink_to(plugin, target_is_directory=True)
+        result = scan_plugin(plugin, source="owner/repo")
+        sev = {f.severity for f in result.findings if f.pattern_id == "path_traversal_deep"}
+        assert sev == {"high"}
+        assert result.verdict == "caution"
