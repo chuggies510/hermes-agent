@@ -287,28 +287,27 @@ def is_pip_install_in_prose_literal(finding: Finding, line: str) -> bool:
 
 # ── (9) in-package relative path ─────────────────────────────────────────────────────────────
 # ``path_traversal(_deep)`` fires on ``../..`` alone, so ``lib/domain/x.ts`` importing
-# ``'../../../data/taxonomy.json'`` scores like an escape. Only two whole-line shapes are
-# demoted, because only there the literal is provably resolved against its own file's directory
-# and nothing else on the line can change the path: a static module specifier, and
-# ``const p = path.resolve|join(import.meta.dir, '<literal>')``. Only data targets qualify
-# (.json, .yaml, .yml): importing an in-package module would execute code the scan may not read.
-# The target must stay inside the plugin root both lexically (how Node normalizes ``..``) and
-# physically (symlinks followed). Anything else, including concatenation, extra arguments or
-# another base, keeps the pattern's severity.
+# ``'../../../data/taxonomy.json'`` scores like an escape. Only a whole-line static module
+# specifier in a JS/TS source file is demoted: the language resolves it against its own file, and no earlier statement
+# can rebind it (a runtime ``path.resolve`` call can be shadowed, so it is never demoted). The
+# target must be a data file (.json, .yaml, .yml) both by name and after symlinks are followed,
+# because importing a module executes code the scan may not read, and it must stay inside the
+# plugin root both lexically (how Node normalizes ``..``) and physically. Anything else keeps the
+# pattern's severity.
 _MODULE_SPECIFIER_LINE = re.compile(
     r"""(?:(?:import|export)\b[^'"`;]*?\bfrom\s*(['"])([^'"`]+)\1|import\s*(['"])([^'"`]+)\3)\s*;?""")
-_OWN_DIR_RESOLVE_LINE = re.compile(
-    r"""const\s+[A-Za-z_$][\w$]*\s*=\s*(?:path\.)?(?:resolve|join)\(\s*import\.meta\.dir\s*,"""
-    r"""\s*(['"])([^'"`]+)\1\s*\)\s*;?""")
+_DATA_SUFFIXES = (".json", ".yaml", ".yml")
+_JS_MODULE_SUFFIXES = (".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".jsx", ".tsx")
 _PLAIN_RELATIVE_DATA_LITERAL = re.compile(r"(?:\.\./)+[A-Za-z0-9_.@+\-/]*\.(?:json|ya?ml)")
 
 
 def is_in_package_traversal(finding: Finding, line: str, rel_path: str, file_path: Path) -> bool:
-    """The whole line is one module specifier or own-directory resolve whose relative literal,
-    resolved on disk, stays inside the plugin root."""
+    """The whole line is one static import of an in-package data file."""
     if finding.pattern_id not in {"path_traversal", "path_traversal_deep"}:
         return False
-    m = _MODULE_SPECIFIER_LINE.fullmatch(line.strip()) or _OWN_DIR_RESOLVE_LINE.fullmatch(line.strip())
+    if Path(rel_path).suffix.lower() not in _JS_MODULE_SUFFIXES:
+        return False    # only JS/TS gives the line static import semantics (a shell can define import())
+    m = _MODULE_SPECIFIER_LINE.fullmatch(line.strip())
     literal = m.group(m.lastindex) if m else ""
     if not _PLAIN_RELATIVE_DATA_LITERAL.fullmatch(literal):
         return False
@@ -319,7 +318,8 @@ def is_in_package_traversal(finding: Finding, line: str, rel_path: str, file_pat
         root, physical = root_dir.resolve(), lexical.resolve()
     except (IndexError, OSError, RuntimeError):
         return False
-    return lexical.is_relative_to(os.path.normpath(root_dir)) and physical.is_relative_to(root)
+    return (lexical.is_relative_to(os.path.normpath(root_dir)) and physical.is_relative_to(root)
+            and physical.suffix.lower() in _DATA_SUFFIXES and physical.is_file())
 
 
 __all__ = [

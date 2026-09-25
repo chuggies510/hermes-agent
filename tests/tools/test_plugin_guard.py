@@ -677,12 +677,38 @@ class TestInPackageRelativeTraversal:
         files = dict(BASE_FILES)
         files["plugin/lib/domain/order.ts"] = (
             "import taxonomy from '../../../data/taxonomy.json';\n"
-            "const p = path.resolve(import.meta.dir, '../../../data/cost/ppi.yaml');\n"
+            "import ppi from '../../../data/cost/ppi.yaml';\n"
         )
+        files["data/taxonomy.json"] = "{}\n"
+        files["data/cost/ppi.yaml"] = "a: 1\n"
         result = scan_plugin(_mk_plugin(tmp_path, files), source="owner/repo")
         sev = {f.line: f.severity for f in result.findings if f.pattern_id == "path_traversal_deep"}
         assert sev == {1: "low", 2: "low"}      # still reported, informational
         assert result.verdict == "safe"
+
+    @pytest.mark.parametrize("line", [
+        "const p = path.resolve(import.meta.dir, '../../../data/taxonomy.json');",  # shadowable call
+        "import missing from '../../../data/absent.json';",                          # no such data file
+    ])
+    def test_runtime_resolve_or_missing_target_keeps_caution(self, tmp_path, line):
+        files = dict(BASE_FILES)
+        files["plugin/lib/domain/order.ts"] = line + "\n"
+        files["data/taxonomy.json"] = "{}\n"
+        result = scan_plugin(_mk_plugin(tmp_path, files), source="owner/repo")
+        sev = {f.severity for f in result.findings if f.pattern_id == "path_traversal_deep"}
+        assert sev == {"high"}
+        assert result.verdict == "caution"
+
+    def test_data_name_symlinked_to_a_module_keeps_caution(self, tmp_path):
+        files = dict(BASE_FILES)
+        files["plugin/lib/domain/order.ts"] = "import x from '../../../data/payload.json';\n"
+        files["data/payload.mjs"] = "export default 1;\n"
+        plugin = _mk_plugin(tmp_path, files)
+        (plugin / "data" / "payload.json").symlink_to(plugin / "data" / "payload.mjs")
+        result = scan_plugin(plugin, source="owner/repo")
+        sev = {f.severity for f in result.findings if f.pattern_id == "path_traversal_deep"}
+        assert sev == {"high"}
+        assert result.verdict == "caution"
 
     def test_traversal_escaping_the_plugin_root_keeps_caution(self, tmp_path):
         files = dict(BASE_FILES)
@@ -738,6 +764,16 @@ class TestInPackageRelativeTraversal:
         plugin = _mk_plugin(tmp_path, files)
         (plugin / "data" / "link").symlink_to(plugin / "data" / "deep" / "a" / "b", target_is_directory=True)
         result = scan_plugin(plugin, source="owner/repo")
+        sev = {f.severity for f in result.findings if f.pattern_id == "path_traversal_deep"}
+        assert sev == {"high"}
+        assert result.verdict == "caution"
+
+    def test_import_shaped_line_outside_js_keeps_caution(self, tmp_path):
+        # A shell script can define import() and read the path from the working directory.
+        files = dict(BASE_FILES)
+        files["plugin/lib/domain/x.sh"] = "import() { cat \"$3\"; }\nimport x from '../../../data/x.json'\n"
+        files["data/x.json"] = "{}\n"
+        result = scan_plugin(_mk_plugin(tmp_path, files), source="owner/repo")
         sev = {f.severity for f in result.findings if f.pattern_id == "path_traversal_deep"}
         assert sev == {"high"}
         assert result.verdict == "caution"
