@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import os
 import re
 from pathlib import Path
 from typing import Optional
@@ -289,15 +290,17 @@ def is_pip_install_in_prose_literal(finding: Finding, line: str) -> bool:
 # ``'../../../data/taxonomy.json'`` scores like an escape. Only two whole-line shapes are
 # demoted, because only there the literal is provably resolved against its own file's directory
 # and nothing else on the line can change the path: a static module specifier, and
-# ``const p = path.resolve|join(import.meta.dir, '<literal>')``. The literal is then resolved on
-# the real filesystem (symlinks followed) and must land inside the plugin root. Anything else,
-# including concatenation, extra arguments or another base, keeps the pattern's severity.
+# ``const p = path.resolve|join(import.meta.dir, '<literal>')``. Only data targets qualify
+# (.json, .yaml, .yml): importing an in-package module would execute code the scan may not read.
+# The target must stay inside the plugin root both lexically (how Node normalizes ``..``) and
+# physically (symlinks followed). Anything else, including concatenation, extra arguments or
+# another base, keeps the pattern's severity.
 _MODULE_SPECIFIER_LINE = re.compile(
     r"""(?:(?:import|export)\b[^'"`;]*?\bfrom\s*(['"])([^'"`]+)\1|import\s*(['"])([^'"`]+)\3)\s*;?""")
 _OWN_DIR_RESOLVE_LINE = re.compile(
-    r"""(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*(?:path\.)?(?:resolve|join)\(\s*import\.meta\.dir\s*,"""
+    r"""const\s+[A-Za-z_$][\w$]*\s*=\s*(?:path\.)?(?:resolve|join)\(\s*import\.meta\.dir\s*,"""
     r"""\s*(['"])([^'"`]+)\1\s*\)\s*;?""")
-_PLAIN_RELATIVE_LITERAL = re.compile(r"(?:\.\./)+[A-Za-z0-9_.@+\-/]*")
+_PLAIN_RELATIVE_DATA_LITERAL = re.compile(r"(?:\.\./)+[A-Za-z0-9_.@+\-/]*\.(?:json|ya?ml)")
 
 
 def is_in_package_traversal(finding: Finding, line: str, rel_path: str, file_path: Path) -> bool:
@@ -307,15 +310,16 @@ def is_in_package_traversal(finding: Finding, line: str, rel_path: str, file_pat
         return False
     m = _MODULE_SPECIFIER_LINE.fullmatch(line.strip()) or _OWN_DIR_RESOLVE_LINE.fullmatch(line.strip())
     literal = m.group(m.lastindex) if m else ""
-    if not _PLAIN_RELATIVE_LITERAL.fullmatch(literal):
+    if not _PLAIN_RELATIVE_DATA_LITERAL.fullmatch(literal):
         return False
     depth = len(Path(rel_path).parts)
     try:
-        root = file_path.parents[depth - 1].resolve()
-        target = (file_path.parent / literal).resolve()
+        root_dir = file_path.parents[depth - 1]
+        lexical = Path(os.path.normpath(file_path.parent / literal))
+        root, physical = root_dir.resolve(), lexical.resolve()
     except (IndexError, OSError, RuntimeError):
         return False
-    return target.is_relative_to(root)
+    return lexical.is_relative_to(os.path.normpath(root_dir)) and physical.is_relative_to(root)
 
 
 __all__ = [

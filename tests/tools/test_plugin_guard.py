@@ -717,3 +717,27 @@ class TestInPackageRelativeTraversal:
         sev = {f.severity for f in result.findings if f.pattern_id == "path_traversal_deep"}
         assert sev == {"high"}
         assert result.verdict == "caution"
+
+    @pytest.mark.parametrize("line", [
+        "import run from '../../../data/payload.mjs';",                                    # executes code
+        "let p = path.resolve(import.meta.dir, '../../../data/x.json');",                 # reassignable
+    ])
+    def test_module_import_or_reassignable_binding_keeps_caution(self, tmp_path, line):
+        files = dict(BASE_FILES)
+        files["plugin/lib/domain/order.ts"] = line + "\n"
+        result = scan_plugin(_mk_plugin(tmp_path, files), source="owner/repo")
+        sev = {f.severity for f in result.findings if f.pattern_id == "path_traversal_deep"}
+        assert sev == {"high"}
+        assert result.verdict == "caution"
+
+    def test_node_lexical_escape_hidden_by_a_deeper_symlink_keeps_caution(self, tmp_path):
+        # Python resolves the symlink before "..", Node applies ".." first: both must stay inside.
+        files = dict(BASE_FILES)
+        files["plugin/lib/domain/order.ts"] = "import x from '../../../data/link/../../../outside.json';\n"
+        files["data/deep/a/b/keep.json"] = "{}\n"
+        plugin = _mk_plugin(tmp_path, files)
+        (plugin / "data" / "link").symlink_to(plugin / "data" / "deep" / "a" / "b", target_is_directory=True)
+        result = scan_plugin(plugin, source="owner/repo")
+        sev = {f.severity for f in result.findings if f.pattern_id == "path_traversal_deep"}
+        assert sev == {"high"}
+        assert result.verdict == "caution"
