@@ -438,6 +438,24 @@ class TestSkillViewPluginGuards:
 
         assert _find_plugin_skills(skip_disabled=True) == []
 
+    def test_listing_does_not_consume_plugin_manager_metadata(self, monkeypatch):
+        from tools.skills_tool import _find_plugin_skills
+
+        metadata = {
+            "name": "myplugin:foo",
+            "description": "A plugin skill",
+            "category": "plugin",
+            "frontmatter": {"name": "foo", "description": "A plugin skill"},
+        }
+        monkeypatch.setattr("hermes_cli.plugins.discover_plugins", lambda: None)
+        monkeypatch.setattr(self.pm, "list_plugin_skill_metadata", lambda: [metadata])
+
+        first = _find_plugin_skills()
+        second = _find_plugin_skills()
+
+        assert first == second == [{"name": "myplugin:foo", "description": "A plugin skill", "category": "plugin"}]
+        assert metadata["frontmatter"] == {"name": "foo", "description": "A plugin skill"}
+
     def test_injection_logged_but_served(self, tmp_path, caplog):
         from tools.skills_tool import skill_view
 

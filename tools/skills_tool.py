@@ -243,12 +243,12 @@ def _find_plugin_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
         discover_plugins()
         skills = []
         for plugin_skill in get_plugin_manager().list_plugin_skill_metadata():
-            frontmatter = plugin_skill.pop("frontmatter", {})
+            frontmatter = plugin_skill.get("frontmatter", {})
             if not skill_matches_platform(frontmatter) or not skill_matches_environment(frontmatter):
                 continue
             if not skip_disabled and _is_skill_disabled(plugin_skill["name"]):
                 continue
-            skills.append(plugin_skill)
+            skills.append({key: value for key, value in plugin_skill.items() if key != "frontmatter"})
         return skills
     except Exception:
         logger.debug("Plugin skill listing failed", exc_info=True)
