@@ -24,6 +24,7 @@ vi.mock('@/store/gateway', () => ({
   ensureGatewayForProfile,
   openGatewayForAgent,
   openGatewayForProfile,
+  gatewayActivationEpoch: () => 0,
   openSecondaryCount
 }))
 // The pool-limits atom is profile.ts's live saturation signal — keep the real

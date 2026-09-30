@@ -6,7 +6,11 @@ import type { DesktopAgentRoster, HermesConnection } from '@/global'
 import { $fleetRoster, _resetFleetRosterForTests } from '@/store/fleet-roster'
 import type { ProfileInfo } from '@/types/hermes'
 
-vi.mock('@/store/gateway', () => ({ $gateway: atom(null) }))
+vi.mock('@/store/gateway', () => ({
+  $gateway: atom(null),
+  activeGatewayConnectionId: () => null,
+  gatewayActivationEpoch: () => 0
+}))
 vi.mock('@/lib/query-client', () => ({ invalidateProfileScopedQueries: vi.fn() }))
 vi.mock('@/store/starmap', () => ({ resetStarmapGraph: vi.fn() }))
 

@@ -11,6 +11,7 @@ import {
   resolveDesktopWindowLaunch,
   resolveDesktopWindowRoute
 } from './desktop-profile'
+import { resolveLaunchProfile } from './primary-profile-pin'
 import { WindowConnectionRouteRegistry } from './window-connection-route'
 
 test('failed authoritative writes leave the previous default and listeners untouched', () => {
@@ -214,3 +215,31 @@ test.each([null, 'local'])(
     }
   }
 )
+
+// The renderer forgets a startup profile its source deleted with
+// remember(null) (store/profile.ts forgetMissingStartupProfile). That must
+// survive a restart as "no preference": the next launch boots without a
+// --profile pin, unlike remember('default'), and the explicit default route is
+// untouched.
+test('forgetting the startup profile persists as no --profile pin', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'desktop-profile-forget-'))
+  const target = path.join(root, 'active-profile.json')
+
+  try {
+    const preferences = createDesktopProfilePreferences(target)
+    const defaultRoute = { connectionId: 'mac-mini', profile: 'work' }
+    preferences.setDefault(defaultRoute)
+    preferences.remember('execassistant')
+
+    assert.equal(preferences.remember(null), null)
+
+    const restarted = createDesktopProfilePreferences(target)
+    assert.deepEqual(resolveLaunchProfile(restarted.readActive), { argvProfile: null, routingProfile: 'default' })
+    assert.deepEqual(restarted.getDefault(), defaultRoute)
+
+    restarted.remember('default')
+    assert.equal(resolveLaunchProfile(createDesktopProfilePreferences(target).readActive).argvProfile, 'default')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})

@@ -2598,6 +2598,22 @@ export function disposeSecondariesForConnection(connectionId: string, opts: { re
   }
 }
 
+// The active source's authoritative profile list no longer serves the active
+// registry scope (deleted or renamed elsewhere). Fall back to the primary as a
+// connection removal does, but leave the socket alone: submitted writes and
+// mounted tiles keep their own route and the pruner retires it once idle.
+// Exact-key only; a primary or legacy profile-only route is never guessed at.
+export function fallBackFromMissingActiveProfile(connectionId: string, profile: string): boolean {
+  if (g.activeKey === g.primaryProfile || g.activeKey !== registryBackendScopeKey(connectionId, normKey(profile))) {
+    return false
+  }
+
+  setActive(g.primaryProfile)
+  g.config?.onActiveConnectionInvalidated?.(g.primaryProfile, gatewayActivationEpoch())
+
+  return true
+}
+
 // Self-accept so editing this module (or a fan-out that lands here) is an
 // in-place hot update instead of a full page reload — the live sockets in `g`
 // survive the swap. Dev-only: production strips import.meta.hot.

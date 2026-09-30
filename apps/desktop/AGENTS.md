@@ -69,6 +69,30 @@ rename sibling of `dropTilesForProfile`. Add any new profile-keyed localStorage
 family to BOTH, or a rename leaves it pointing at a backend that no longer
 exists ("Couldn't open this session" on every restore).
 
+A profile deleted or renamed OUTSIDE this window (CLI, another window) has no
+such event. `refreshProfiles` (`store/profile.ts`) treats the active registry
+source's own `/api/profiles` list as proof only while it is current (same
+source, profile, activation, no swap) and names Default; anything else proves
+nothing and changes nothing. When it omits the active profile, an exact-scope
+secondary falls back to the primary like a connection removal
+(`fallBackFromMissingActiveProfile`, socket left alone), and a primary missing
+from that same source re-homes to Default on the SAME connection through
+`ensureGatewayAgent` (the primary socket stays open). A primary name that is
+not registry-scoped may be a per-profile override alias the source never
+served, so it re-homes only when it has no override. A draft on a missing
+owner is cleared, and a retired owner resolves to its source's Default in the
+owner resolvers, so Home "+" and Send cannot pin it even while the re-home
+dials. A retirement is revived when that source lists the name again and
+forgotten when its registry entry is edited or removed. Once Default lands,
+the legacy startup profile is cleared to `null` (never `'default'`, which pins
+`--profile default`, see `electron/profile-migration.ts`) only for a primary
+that preference launched (not a registry route, not a window pin), while it
+still names the missing profile and no explicit default route exists. Known
+limit: a saved default route naming the missing profile is skipped for New
+Session but never rewritten (no renderer IPC clears it), so every launch still
+dials that route first (a startup flicker, or a failed boot where the source
+cannot serve the name) until the user picks another default.
+
 When an id is verifiably gone anyway (`goneSessionVerdict` → `'draft'`), the
 window drops to a fresh draft without toasting or looping — and the unsent
 text stashed under the dead key follows it: the verdict calls

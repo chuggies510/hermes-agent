@@ -69,6 +69,7 @@ import { notify, notifyError, RECOVERY_ACTIONS } from '@/store/notifications'
 import { loadPoolLimits } from '@/store/pool-limits'
 import {
   $activeGatewayProfile,
+  forgetRetiredProfilesForConnection,
   normalizeProfileKey,
   refreshActiveProfile,
   touchActiveGatewayBackend
@@ -1267,6 +1268,7 @@ export function useGatewayBoot({
       }
 
       disposeSecondariesForConnection(payload.connectionId, { redial: payload.reason === 'updated' })
+      forgetRetiredProfilesForConnection(payload.connectionId)
 
       if (payload.reason !== 'updated') {
         // Nothing can dial the removed source again: drop the persisted exact

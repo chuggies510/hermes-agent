@@ -16,12 +16,16 @@ import {
 } from '@/lib/storage'
 import { withTimeout } from '@/lib/with-timeout'
 import { registryConnectionKind } from '@/store/connection-registry-state'
+import { refreshDefaultProfile } from '@/store/default-profile'
 import {
   $gateway,
   activeGatewayConnectionId,
   activeGatewayProfileKey,
   ensureGatewayForAgent,
   ensureGatewayForProfile,
+  fallBackFromMissingActiveProfile,
+  gatewayActivationEpoch,
+  isActivePrimary,
   openGatewayForAgent,
   openGatewayForProfile,
   openSecondaryCount
@@ -33,6 +37,7 @@ import { exitProjectScope } from '@/store/project-scope'
 import { $connection, clearComposerSelectionOwner, setComposerSelectionOwner, setConnection } from '@/store/session'
 import type { SessionOwnerRoute } from '@/store/session-request-router'
 import { resetStarmapGraph } from '@/store/starmap'
+import { windowProfileOverride } from '@/store/windows'
 import type { ProfileInfo } from '@/types/hermes'
 
 // Canonical key for a profile: trimmed, empty → "default". Used everywhere we
@@ -116,6 +121,12 @@ export function refreshProfiles(): Promise<ProfileInfo[]> {
   const flight = (async () => {
     const epoch = profileListEpoch
     const source = profileListSource($connection.get())
+    const owner = {
+      activationEpoch: gatewayActivationEpoch(),
+      connectionId: activeGatewayConnectionId(),
+      profile: normalizeProfileKey($activeGatewayProfile.get()),
+      source
+    }
     const MAX_RETRIES = 2
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -130,6 +141,7 @@ export function refreshProfiles(): Promise<ProfileInfo[]> {
 
             $profiles.set(profiles)
           })
+          retireMissingOwners(owner, profiles)
         }
 
         return profiles
@@ -167,6 +179,169 @@ export function refreshProfiles(): Promise<ProfileInfo[]> {
   refreshInFlight = flight
 
   return flight
+}
+
+// Owners retireMissingOwners retired, per registry connection. Only these are
+// known dead: a saved route naming one is skipped (never rewritten) and a new
+// chat naming one resolves to that source's Default. A later list from the
+// source that names the profile again revives it.
+const retiredProfiles = new Map<string, Set<string>>()
+
+export function isProfileMissingOnConnection(connectionId: null | string, profile: string): boolean {
+  return Boolean(connectionId && retiredProfiles.get(connectionId)?.has(normalizeProfileKey(profile)))
+}
+
+function retireProfile(connectionId: string, profile: string): void {
+  retiredProfiles.set(connectionId, (retiredProfiles.get(connectionId) ?? new Set<string>()).add(profile))
+}
+
+// A registry entry edited to another backend, or removed: its retirements
+// described the old one (use-gateway-boot's registry-change handler).
+export function forgetRetiredProfilesForConnection(connectionId: string): void {
+  retiredProfiles.delete(connectionId)
+}
+
+function liveOwnerRoute(route: AgentProfileRoute | null): AgentProfileRoute | null {
+  return route && isProfileMissingOnConnection(route.connectionId, route.profile)
+    ? { connectionId: route.connectionId, profile: 'default' }
+    : route
+}
+
+interface ListOwner {
+  activationEpoch: number
+  connectionId: null | string
+  profile: string
+  source: null | string
+}
+
+// The route the list was requested for is still the one in front of the user:
+// same source, profile and activation, and no swap mid-flight.
+function ownerStillActive(owner: ListOwner): boolean {
+  return (
+    $gatewaySwapTarget.get() === null &&
+    gatewayActivationEpoch() === owner.activationEpoch &&
+    activeGatewayConnectionId() === owner.connectionId &&
+    normalizeProfileKey($activeGatewayProfile.get()) === owner.profile
+  )
+}
+
+// A profile deleted or renamed elsewhere (CLI, another window) must stop
+// owning the foreground once the active source's own list omits it; otherwise
+// every new chat pins the dead name and the backend rejects it. Proof rules:
+// apps/desktop/AGENTS.md, "A profile deleted or renamed OUTSIDE this window".
+function retireMissingOwners(owner: ListOwner, profiles: ProfileInfo[]): void {
+  const { connectionId } = owner
+
+  if (!connectionId || owner.source !== connectionId) {
+    return
+  }
+
+  const names = new Set(profiles.map(item => normalizeProfileKey(item.is_default ? 'default' : item.name)))
+  const retired = retiredProfiles.get(connectionId)
+
+  for (const name of names) {
+    retired?.delete(name)
+  }
+
+  if (!names.has('default') || !ownerStillActive(owner)) {
+    return
+  }
+
+  // Resolve the draft before the fallback moves the active route under it.
+  const draft = resolveNewChatOwnerRoute()
+
+  if (draft?.connectionId === connectionId && !names.has(normalizeProfileKey(draft.profile))) {
+    $newChatProfile.set(null)
+    $newChatRoute.set(null)
+    captureNewChatSource(null)
+  }
+
+  if (names.has(owner.profile)) {
+    return
+  }
+
+  if (!fallBackFromMissingActiveProfile(connectionId, owner.profile)) {
+    // Only the primary's own descriptor says which door launched it.
+    if (isActivePrimary()) {
+      void rehomeMissingPrimary({ ...owner, connectionId }, $connection.get())
+    }
+
+    return
+  }
+
+  retireProfile(connectionId, owner.profile)
+
+  // The primary the fallback landed on may be gone from this source too.
+  const primary = normalizeProfileKey($activeGatewayProfile.get())
+
+  if (activeGatewayConnectionId() === connectionId && !names.has(primary)) {
+    const landed = { activationEpoch: gatewayActivationEpoch(), connectionId, profile: primary, source: owner.source }
+    void rehomeMissingPrimary(landed, null)
+  }
+}
+
+// The primary has nothing to fall back to, so it takes the rail's Default
+// door on the SAME source (ensureGatewayAgent): the primary socket stays open
+// for whatever it is already carrying. `door` is the primary's descriptor when
+// known; an inferred (not registry-scoped) name may be a per-profile override
+// alias this source never served, so its list proves nothing about it.
+async function rehomeMissingPrimary(
+  owner: ListOwner & { connectionId: string },
+  door: HermesConnection | null
+): Promise<void> {
+  const scoped = door?.registryScoped === true
+
+  // The await yields, so a concurrent refresh or switch may own the route now.
+  if ((!scoped && !(await isLocalDesktopProfile(owner.profile))) || !ownerStillActive(owner)) {
+    return
+  }
+
+  retireProfile(owner.connectionId, owner.profile)
+
+  try {
+    await ensureGatewayAgent(owner.connectionId, 'default')
+  } catch (error) {
+    console.warn(`[profiles] re-homing from missing primary "${owner.profile}" failed`, error)
+
+    return
+  }
+
+  // Persist only a re-home that landed and is still in front of the user, and
+  // only for a primary the startup preference itself launched: a registry
+  // route or a window pin names another source's profile, maybe a same-named
+  // local one the preference still means.
+  if (
+    door &&
+    !scoped &&
+    !windowProfileOverride() &&
+    activeGatewayConnectionId() === owner.connectionId &&
+    normalizeProfileKey($activeGatewayProfile.get()) === 'default'
+  ) {
+    await forgetMissingStartupProfile(owner.profile)
+  }
+}
+
+// The next launch would boot the primary into the same missing profile.
+// Electron has no compare-and-set for the preference, so compare right before
+// the write: only a saved value still naming the proven-missing profile is
+// cleared (null boots without a --profile pin, see profile-migration.ts), and
+// an explicit default route (which decides launch) is left be.
+async function forgetMissingStartupProfile(missing: string): Promise<void> {
+  const bridge = window.hermesDesktop?.profile
+
+  if (!bridge?.get || !bridge.remember) {
+    return
+  }
+
+  try {
+    const [saved, route] = await Promise.all([bridge.get(), refreshDefaultProfile()])
+
+    if (!route && saved?.profile && normalizeProfileKey(saved.profile) === missing) {
+      await bridge.remember(null)
+    }
+  } catch (error) {
+    console.warn(`[profiles] could not forget missing startup profile "${missing}"`, error)
+  }
 }
 
 // Source changes can keep the same profile name (default → default), including
@@ -387,13 +562,15 @@ function profilePickConnectionId(profile?: string): null | string {
  * the source a profile pick would dial (an uncaptured intent), or to the
  * active source when there is no profile intent at all — so session.create,
  * the owner hint, the optimistic row and every later session-scoped RPC name
- * the same registry entry. A legacy profile-only activation yields null.
+ * the same registry entry. A legacy profile-only activation yields null. An
+ * owner retired because its source dropped it resolves to that source's
+ * Default, including while the re-home away from it is still dialing.
  */
 export function resolveNewChatOwnerRoute(forProfile?: string): AgentProfileRoute | null {
   const explicit = $newChatRoute.get()
 
   if (explicit && (!forProfile || normalizeProfileKey(explicit.profile) === normalizeProfileKey(forProfile))) {
-    return explicit
+    return liveOwnerRoute(explicit)
   }
 
   const intentProfile = forProfile ? normalizeProfileKey(forProfile) : $newChatProfile.get()
@@ -412,10 +589,10 @@ export function resolveNewChatOwnerRoute(forProfile?: string): AgentProfileRoute
     return null
   }
 
-  return {
+  return liveOwnerRoute({
     connectionId,
     profile: normalizeProfileKey(intentProfile || $activeGatewayProfile.get())
-  }
+  })
 }
 
 /**
@@ -429,7 +606,7 @@ export function resolveActiveSourceOwnerRoute(profile: string): AgentProfileRout
   const key = normalizeProfileKey(profile)
   const connectionId = (profilePickConnectionId(key) ?? '').trim()
 
-  return connectionId ? { connectionId, profile: key } : null
+  return liveOwnerRoute(connectionId ? { connectionId, profile: key } : null)
 }
 
 // Bumped whenever the open session should be dropped for a fresh new-session

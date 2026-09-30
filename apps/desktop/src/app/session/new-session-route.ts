@@ -8,6 +8,7 @@ import {
   captureNewChatSource,
   ensureGatewayAgent,
   ensureGatewayProfile,
+  isProfileMissingOnConnection,
   pinLegacyNewChatProfile
 } from '@/store/profile'
 import { $projectScope, ALL_PROJECTS } from '@/store/project-scope'
@@ -33,7 +34,9 @@ export function defaultNewSessionTarget(): { profile: string; route: AgentProfil
   const profile = !isPeerInstanceWindow() || isProfilePinnedWindow() ? windowProfileOverride() : null
   const saved = profile ? { connectionId: windowConnectionOverride(), profile } : $defaultProfileRoute.get()
 
-  if (!saved) {
+  // A saved route to a profile its source has since dropped would re-pin the
+  // dead owner on every New Session; the active route serves instead.
+  if (!saved || isProfileMissingOnConnection(saved.connectionId, saved.profile)) {
     return null
   }
 
